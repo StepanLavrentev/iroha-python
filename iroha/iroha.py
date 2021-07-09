@@ -341,19 +341,34 @@ class IrohaGrpc(object):
     Possible implementation of gRPC transport to Iroha
     """
 
-    def __init__(self, address=None, timeout=None, secure=False):
+    def __init__(self, address=None, timeout=None, secure=False, root_certificates=None, private_key=None, certificate_chain=None, *, max_message_length=None):
         """
         Create Iroha gRPC client
         :param address: Iroha Torii address with port, example "127.0.0.1:50051"
         :param timeout: timeout for network I/O operations in seconds
         :param secure: enable grpc ssl channel
+        :param max_message_length: it is max message length in bytes for grpc
+        :param root_certificates The PEM-encoded root certificates as a byte string,
+        or None to retrieve them from a default location chosen by gRPC
+        runtime. https://grpc.io/docs/guides/auth/
+        :param private_key The PEM-encoded private key as a byte string, or None if no
+        private key should be used.
+        :param certificate_chain The PEM-encoded certificate chain as a byte string
+        to use or None if no certificate chain should be used.
         """
         self._address = address if address else '127.0.0.1:50051'
 
+        channel_kwargs = {}
+        if max_message_length is not None:
+            channel_kwargs['options'] = [
+                ('grpc.max_send_message_length', max_message_length),
+                ('grpc.max_receive_message_length', max_message_length)]
+
         if secure:
-            self._channel = grpc.secure_channel(self._address, grpc.ssl_channel_credentials())
+            self._channel = grpc.secure_channel(self._address, grpc.ssl_channel_credentials(
+                root_certificates, private_key, certificate_chain), **channel_kwargs)
         else:
-            self._channel = grpc.insecure_channel(self._address)
+            self._channel = grpc.insecure_channel(self._address, **channel_kwargs)
 
         self._timeout = timeout
         self._command_service_stub = endpoint_pb2_grpc.CommandService_v1Stub(
@@ -441,10 +456,25 @@ class IrohaGrpc(object):
         integral status code, and error code (will be 0 if no error occurred)
         :raise: grpc.RpcError with .code() available in case of any error
         """
+        tx_hash = IrohaCrypto.hash(transaction)
+        yield from self.tx_hash_status_stream(tx_hash, timeout)
+
+    def tx_hash_status_stream(self, transaction_hash: "str or bytes", timeout=None):
+        """
+        Generator of transaction statuses from status stream
+        :param transaction_hash: the hash of transaction, which status is about to be known
+        :param timeout: timeout for network I/O operations in seconds
+        :return: an iterable over a series of tuples with symbolic status description,
+        integral status code, and error code (will be 0 if no error occurred)
+        :raise: grpc.RpcError with .code() available in case of any error
+        """
         if not timeout:
             timeout = self._timeout
         request = endpoint_pb2.TxStatusRequest()
-        request.tx_hash = binascii.hexlify(IrohaCrypto.hash(transaction))
+        if isinstance(transaction_hash, bytes):
+            request.tx_hash = binascii.hexlify(transaction_hash)
+        else:
+            request.tx_hash = transaction_hash.encode('utf-8')
         response = self._command_service_stub.StatusStream(
             request, timeout=timeout)
         for status in response:
